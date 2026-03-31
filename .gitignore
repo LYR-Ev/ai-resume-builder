@@ -1,0 +1,63 @@
+# =========================
+# Dependencies
+# =========================
+node_modules/
+
+# =========================
+# Next.js build output
+# =========================
+.next/
+out/
+build/
+dist/
+
+# =========================
+# Logs
+# =========================
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# =========================
+# TypeScript / Coverage / Temp
+# =========================
+*.tsbuildinfo
+coverage/
+.cache/
+.temp/
+tmp/
+
+# =========================
+# Local exported files
+# =========================
+exports/
+uploads/
+generated/
+*.pdf
+*.docx
+
+# =========================
+# IDE / Editor / OS
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =========================
+# Deployment
+# =========================
+.vercel/

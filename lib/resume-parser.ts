@@ -1,231 +1,261 @@
 import { v4 as uuid } from "uuid";
+import { cleanResumeText } from "@/lib/resume-cleaner";
+import { makeParsedField, ResumeImportReport, summarizeLowConfidence } from "@/lib/resume-confidence";
 import { normalizeResumeData } from "@/lib/resume-normalizer";
+import { ResumeSectionBlock, splitResumeIntoSections } from "@/lib/resume-section-splitter";
 import { ResumeData } from "@/types/resume";
 
-function parseLinesToBullets(lines: string[]) {
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const PHONE_RE = /(?:\+?86[-\s]?)?(1[3-9]\d{9})/;
+const URL_RE = /https?:\/\/[^\s)]+/gi;
+const DATE_RANGE_RE = /(\d{4}\.\d{2}|\d{4})\s*[-~至—]\s*(\d{4}\.\d{2}|\d{4}|至今|present)/i;
+
+export interface ParsedResumeDraft {
+  resume: ResumeData;
+  report: ResumeImportReport;
+}
+
+function splitByBullets(lines: string[]) {
   return lines
-    .map((line) => line.replace(/^[-*]\s*/, "").trim())
+    .join("\n")
+    .split(/\n(?=[-*•]|\d+\.)/)
+    .map((chunk) => chunk.replace(/^[-*•]|\d+\./, "").trim())
     .filter(Boolean);
+}
+
+function splitItemBlocks(lines: string[]) {
+  const blocks: string[] = [];
+  let current: string[] = [];
+  for (const line of lines) {
+    const isBoundary = DATE_RANGE_RE.test(line) || /^[-*•]\s*/.test(line);
+    if (isBoundary && current.length) {
+      blocks.push(current.join(" "));
+      current = [line];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length) blocks.push(current.join(" "));
+  return blocks.filter(Boolean);
+}
+
+function parseBasicsSection(sectionText: string, topText: string) {
+  const text = `${topText}\n${sectionText}`.trim();
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const email = text.match(EMAIL_RE)?.[0] ?? "";
+  const phone = text.match(PHONE_RE)?.[0] ?? "";
+  const urls = text.match(URL_RE) ?? [];
+  const github = urls.find((url) => /github\.com/i.test(url)) ?? "";
+  const website = urls.find((url) => !/github\.com/i.test(url)) ?? "";
+  const location = lines.find((line) => /(所在地|城市|现居|location)/i.test(line))?.split(/[:：]/).slice(1).join(":").trim() ?? "";
+  const targetRole = lines
+    .find((line) => /(求职意向|目标岗位|应聘岗位|objective|target role)/i.test(line))
+    ?.split(/[:：]/)
+    .slice(1)
+    .join(":")
+    .trim() ?? "";
+  const name =
+    lines.find(
+      (line) =>
+        line.length >= 2 &&
+        line.length <= 18 &&
+        !/@|github|https?:\/\/|电话|邮箱|求职|目标岗位|location|所在地|城市/i.test(line)
+    ) ?? "";
+
+  return {
+    basics: {
+      name,
+      phone,
+      email,
+      targetRole,
+      location,
+      github,
+      website,
+      photoDataUrl: "",
+      photoFileName: "",
+      photoMimeType: ""
+    },
+    confidence: {
+      name: makeParsedField(name, name ? 0.55 : 0.2),
+      phone: makeParsedField(phone, phone ? 0.95 : 0.2),
+      email: makeParsedField(email, email ? 0.98 : 0.2)
+    }
+  };
+}
+
+function parseEducationSection(blocks: ResumeSectionBlock[]) {
+  const items = blocks.flatMap((block) =>
+    splitItemBlocks(block.lines).map((text) => {
+      const dateRange = text.match(DATE_RANGE_RE);
+      const major = text.match(/(专业|major)[:：]?\s*([^\s,;]+)/i)?.[2] ?? "";
+      const degree = text.match(/(本科|硕士|博士|大专|学士|master|phd|bachelor)/i)?.[0] ?? "";
+      const gpa = text.match(/(gpa|绩点|排名)[:：]?\s*([^\s,;]+)/i)?.[0] ?? "";
+      return {
+        id: uuid(),
+        title: text.slice(0, 24),
+        degree,
+        major,
+        startDate: dateRange?.[1] ?? "",
+        endDate: dateRange?.[2] ?? "",
+        description: [text, gpa].filter(Boolean).join(" | ")
+      };
+    })
+  );
+  return items;
+}
+
+function parseProjectsSection(blocks: ResumeSectionBlock[]) {
+  return blocks.flatMap((block) =>
+    splitItemBlocks(block.lines).map((text) => {
+      const dateRange = text.match(DATE_RANGE_RE);
+      const role = text.match(/(角色|岗位|职责|role)[:：]?\s*([^\s,;]+)/i)?.[2] ?? "";
+      const bullets = splitByBullets([text]);
+      return {
+        id: uuid(),
+        title: text.split(/[|｜-]/)[0].slice(0, 30),
+        role,
+        startDate: dateRange?.[1] ?? "",
+        endDate: dateRange?.[2] ?? "",
+        description: text,
+        technologies: [],
+        highlights: bullets.length ? bullets : [text]
+      };
+    })
+  );
+}
+
+function parseExperienceSection(blocks: ResumeSectionBlock[]) {
+  return blocks.flatMap((block) =>
+    splitItemBlocks(block.lines).map((text) => {
+      const dateRange = text.match(DATE_RANGE_RE);
+      const role = text.match(/(岗位|职位|role|title)[:：]?\s*([^\s,;]+)/i)?.[2] ?? "";
+      const company = text.match(/(公司|单位|organization|company)[:：]?\s*([^\s,;]+)/i)?.[2] ?? "";
+      const bullets = splitByBullets([text]);
+      return {
+        id: uuid(),
+        title: company || text.split(/[|｜-]/)[0].slice(0, 30),
+        role,
+        startDate: dateRange?.[1] ?? "",
+        endDate: dateRange?.[2] ?? "",
+        description: text,
+        achievements: bullets.length ? bullets : [text]
+      };
+    })
+  );
+}
+
+function parseSkillsSection(blocks: ResumeSectionBlock[]) {
+  const raw = blocks.map((block) => block.rawText).join("\n");
+  const parts = raw
+    .split(/[,\n、;；|/]/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [{ id: uuid(), category: "技能", items: Array.from(new Set(parts)) }];
+}
+
+function parseSimpleListSection(blocks: ResumeSectionBlock[]) {
+  return blocks.flatMap((block) =>
+    splitByBullets(block.lines).map((line) => ({
+      id: uuid(),
+      title: line,
+      description: block.rawText
+    }))
+  );
+}
+
+function pushRawSectionFallback(partial: Partial<ResumeData>, title: string, rawText: string) {
+  if (!rawText.trim()) return;
+  partial.customSections?.push({
+    id: uuid(),
+    title,
+    items: [{ id: uuid(), title, subtitle: "", date: "", description: rawText }]
+  });
+}
+
+function createImportReport(
+  basicsConfidence: { name: { confidence: number; value: string }; phone: { confidence: number; value: string }; email: { confidence: number; value: string } },
+  partial: Partial<ResumeData>
+): ResumeImportReport {
+  const educationCount = partial.education?.length ?? 0;
+  const projectsCount = partial.projects?.length ?? 0;
+  const experienceCount = partial.experience?.length ?? 0;
+  const report: ResumeImportReport = {
+    name: basicsConfidence.name,
+    phone: basicsConfidence.phone,
+    email: basicsConfidence.email,
+    educationCount: makeParsedField(educationCount, educationCount > 0 ? 0.8 : 0.3),
+    projectsCount: makeParsedField(projectsCount, projectsCount > 0 ? 0.75 : 0.3),
+    experienceCount: makeParsedField(experienceCount, experienceCount > 0 ? 0.75 : 0.3),
+    lowConfidenceFields: []
+  };
+  report.lowConfidenceFields = summarizeLowConfidence([
+    { label: "姓名", confidence: report.name.confidence, hasValue: Boolean(report.name.value) },
+    { label: "电话", confidence: report.phone.confidence, hasValue: Boolean(report.phone.value) },
+    { label: "邮箱", confidence: report.email.confidence, hasValue: Boolean(report.email.value) },
+    { label: "教育经历", confidence: report.educationCount.confidence, hasValue: report.educationCount.value > 0 },
+    { label: "项目经历", confidence: report.projectsCount.confidence, hasValue: report.projectsCount.value > 0 },
+    { label: "实习/工作经历", confidence: report.experienceCount.confidence, hasValue: report.experienceCount.value > 0 }
+  ]);
+  return report;
+}
+
+export function parseResumeTextToResumeDraft(text: string): ParsedResumeDraft {
+  const cleanedText = cleanResumeText(text);
+  const parserInput = cleanedText || text.trim();
+  if (!parserInput) {
+    throw new Error("PDF 文本为空或不可识别，请尝试可复制文本的电子版简历。");
+  }
+
+  const sections = splitResumeIntoSections(parserInput);
+  const topText = parserInput.split("\n").slice(0, 12).join("\n");
+  const basicsBlocks = sections.byKey.basics.map((block) => block.rawText).join("\n");
+  const basicsParsed = parseBasicsSection(basicsBlocks, topText);
+
+  const partial: Partial<ResumeData> = {
+    basics: basicsParsed.basics,
+    summary: sections.byKey.summary.map((block) => block.rawText).join("\n").trim(),
+    education: parseEducationSection(sections.byKey.education),
+    projects: parseProjectsSection(sections.byKey.projects),
+    experience: parseExperienceSection(sections.byKey.experience),
+    skills: parseSkillsSection(sections.byKey.skills),
+    awards: parseSimpleListSection(sections.byKey.awards),
+    activities: parseSimpleListSection(sections.byKey.activities),
+    certifications: parseSimpleListSection(sections.byKey.certifications),
+    customSections: []
+  };
+
+  if (!partial.summary) {
+    const possibleSummary = parserInput
+      .split("\n")
+      .find((line) => /(年经验|负责|擅长|熟悉|主导|沟通|协作)/.test(line) && line.length > 12);
+    partial.summary = possibleSummary ?? "";
+  }
+
+  for (const unknownBlock of sections.byKey.unknown) {
+    pushRawSectionFallback(partial, unknownBlock.title || "未分类内容", unknownBlock.rawText);
+  }
+  if (sections.byKey.education.length && !partial.education?.length) {
+    pushRawSectionFallback(partial, "教育经历(原始文本)", sections.byKey.education.map((block) => block.rawText).join("\n"));
+  }
+  if (sections.byKey.projects.length && !partial.projects?.length) {
+    pushRawSectionFallback(partial, "项目经历(原始文本)", sections.byKey.projects.map((block) => block.rawText).join("\n"));
+  }
+  if (sections.byKey.experience.length && !partial.experience?.length) {
+    pushRawSectionFallback(partial, "实习/工作经历(原始文本)", sections.byKey.experience.map((block) => block.rawText).join("\n"));
+  }
+
+  const resume = normalizeResumeData(partial);
+  const report = createImportReport(basicsParsed.confidence, partial);
+  return { resume, report };
+}
+
+export function parseResumeTextToResumeData(text: string): ResumeData {
+  return parseResumeTextToResumeDraft(text).resume;
 }
 
 export function parseResumeJson(text: string): ResumeData {
   const raw = JSON.parse(text) as Partial<ResumeData>;
   return normalizeResumeData(raw);
-}
-
-function sanitizeText(text: string) {
-  return text
-    .replace(/\r\n/g, "\n")
-    .replace(/\u00a0/g, " ")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function extractHeaderBasics(lines: string[]) {
-  const joined = lines.join("\n");
-  const email = joined.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)?.[0] ?? "";
-  const phone =
-    joined.match(/(?:\+?86[-\s]?)?(1[3-9]\d{9})/)?.[0] ??
-    joined.match(/\b\d{3,4}[-\s]?\d{7,8}\b/)?.[0] ??
-    "";
-  const github = joined.match(/https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9_.-]+/i)?.[0] ?? "";
-  const urls = joined.match(/https?:\/\/[^\s)]+/gi) ?? [];
-  const website = urls.find((url) => !/github\.com/i.test(url)) ?? "";
-  const targetRoleLine =
-    lines.find((line) => /(求职意向|应聘岗位|目标岗位|target role|objective)/i.test(line)) ?? "";
-  const locationLine = lines.find((line) => /(所在地|城市|现居|location)/i.test(line)) ?? "";
-
-  const cleanLine = (line: string) => line.replace(/^[-*]\s*/, "").replace(/[|]/g, " ").trim();
-  const nameCandidate = lines
-    .map(cleanLine)
-    .find(
-      (line) =>
-        line.length >= 2 &&
-        line.length <= 24 &&
-        !/@|https?:\/\/|github|电话|手机|email|邮箱|求职意向|目标岗位|所在地|location/i.test(line)
-    );
-
-  const targetRole = targetRoleLine.split(/[:：]/).slice(1).join(":").trim();
-  const location = locationLine.split(/[:：]/).slice(1).join(":").trim();
-
-  return {
-    name: nameCandidate ?? "",
-    email,
-    phone,
-    github,
-    website,
-    targetRole,
-    location
-  };
-}
-
-function sectionKeyByTitle(title: string):
-  | "summary"
-  | "education"
-  | "projects"
-  | "experience"
-  | "skills"
-  | "awards"
-  | "activities"
-  | "certifications"
-  | "unknown"
-  | null {
-  const t = title.trim().toLowerCase();
-  if (!t) return null;
-  if (/(个人简介|个人总结|summary|profile|about)/i.test(t)) return "summary";
-  if (/(教育经历|教育背景|education)/i.test(t)) return "education";
-  if (/(项目经历|项目经验|projects?)/i.test(t)) return "projects";
-  if (/(实习经历|工作经历|职业经历|experience|employment)/i.test(t)) return "experience";
-  if (/(技能清单|专业技能|技能|skills?)/i.test(t)) return "skills";
-  if (/(获奖经历|获奖|awards?|honors?)/i.test(t)) return "awards";
-  if (/(校园经历|社团经历|活动经历|activities|leadership)/i.test(t)) return "activities";
-  if (/(证书|语言成绩|certifications?|languages?)/i.test(t)) return "certifications";
-  if (/^[\u4e00-\u9fa5a-zA-Z ]{2,20}$/.test(t)) return "unknown";
-  return null;
-}
-
-function splitSections(text: string) {
-  const lines = sanitizeText(text)
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const sections: Array<{ title: string; key: ReturnType<typeof sectionKeyByTitle>; lines: string[] }> = [];
-  let current = { title: "未分类内容", key: "unknown" as ReturnType<typeof sectionKeyByTitle>, lines: [] as string[] };
-
-  for (const line of lines) {
-    const key = sectionKeyByTitle(line);
-    const isLikelyHeader = Boolean(key) && line.length <= 28;
-    if (isLikelyHeader) {
-      if (current.lines.length) sections.push(current);
-      current = { title: line, key, lines: [] };
-      continue;
-    }
-    current.lines.push(line);
-  }
-  if (current.lines.length) sections.push(current);
-  return sections;
-}
-
-function toListItems(lines: string[]) {
-  return lines
-    .map((line) => line.replace(/^[-*]\s*/, "").trim())
-    .filter(Boolean)
-    .map((line) => ({ id: uuid(), title: line, description: "" }));
-}
-
-export function parseResumeTextToResumeData(text: string): ResumeData {
-  const normalizedText = sanitizeText(text);
-  const allLines = normalizedText
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const basicsFromHeader = extractHeaderBasics(allLines.slice(0, 24));
-  const sections = splitSections(normalizedText);
-
-  const partial: Partial<ResumeData> = {
-    basics: {
-      name: basicsFromHeader.name,
-      phone: basicsFromHeader.phone,
-      email: basicsFromHeader.email,
-      targetRole: basicsFromHeader.targetRole,
-      location: basicsFromHeader.location,
-      github: basicsFromHeader.github,
-      website: basicsFromHeader.website,
-      photoDataUrl: "",
-      photoFileName: "",
-      photoMimeType: ""
-    },
-    summary: "",
-    education: [],
-    projects: [],
-    experience: [],
-    skills: [],
-    awards: [],
-    activities: [],
-    certifications: [],
-    customSections: []
-  };
-
-  for (const section of sections) {
-    const lines = section.lines.map((line) => line.trim()).filter(Boolean);
-    if (!lines.length) continue;
-
-    if (section.key === "summary") {
-      partial.summary = lines.join(" ");
-      continue;
-    }
-
-    if (section.key === "education") {
-      partial.education = toListItems(lines).map((item) => ({ ...item, startDate: "", endDate: "" }));
-      continue;
-    }
-
-    if (section.key === "projects") {
-      partial.projects = toListItems(lines).map((item) => ({
-        ...item,
-        technologies: [],
-        highlights: []
-      }));
-      continue;
-    }
-
-    if (section.key === "experience") {
-      partial.experience = toListItems(lines).map((item) => ({
-        ...item,
-        achievements: []
-      }));
-      continue;
-    }
-
-    if (section.key === "skills") {
-      const items = lines
-        .flatMap((line) => line.split(/[、,，|/]/g))
-        .map((item) => item.trim())
-        .filter(Boolean);
-      partial.skills = [{ id: uuid(), category: "技能", items }];
-      continue;
-    }
-
-    if (section.key === "awards") {
-      partial.awards = toListItems(lines);
-      continue;
-    }
-
-    if (section.key === "activities") {
-      partial.activities = toListItems(lines);
-      continue;
-    }
-
-    if (section.key === "certifications") {
-      partial.certifications = toListItems(lines);
-      continue;
-    }
-
-    // 兜底保留原始文本，避免信息丢失
-    partial.customSections?.push({
-      id: uuid(),
-      title: section.title || "导入内容",
-      items: [
-        {
-          id: uuid(),
-          title: section.title || "导入内容",
-          subtitle: "",
-          date: "",
-          description: lines.join("\n")
-        }
-      ]
-    });
-  }
-
-  if (!partial.summary) {
-    const summaryLine =
-      allLines.find((line) => /(年经验|擅长|负责|熟悉|主导)/.test(line) && line.length > 10) ?? "";
-    partial.summary = summaryLine;
-  }
-
-  return normalizeResumeData(partial);
 }
 
 export function mergeResumeData(current: ResumeData, incoming: ResumeData): ResumeData {
@@ -269,125 +299,7 @@ export function mergeResumeData(current: ResumeData, incoming: ResumeData): Resu
  */
 export function parseResumeMarkdown(text: string): ResumeData {
   if (!text.trim()) return normalizeResumeData({});
-  const sections = text.split(/\n##\s+/).map((item, index) => {
-    if (index === 0 && item.startsWith("## ")) {
-      return item.replace(/^##\s+/, "");
-    }
-    return item;
-  });
-
-  const partial: Partial<ResumeData> = {
-    basics: {
-      name: "",
-      phone: "",
-      email: "",
-      targetRole: "",
-      location: "",
-      github: "",
-      website: "",
-      photoDataUrl: "",
-      photoFileName: "",
-      photoMimeType: ""
-    },
-    education: [],
-    projects: [],
-    experience: [],
-    skills: [],
-    awards: [],
-    activities: [],
-    certifications: [],
-    customSections: []
-  };
-
-  for (const block of sections) {
-    const [headerLine, ...rest] = block.split("\n");
-    const header = (headerLine || "").trim().toLowerCase();
-    const content = rest.join("\n").trim();
-    const lines = content.split("\n").map((line) => line.trim());
-
-    if (!header) continue;
-
-    if (header.includes("基本信息")) {
-      for (const line of lines) {
-        const [k, ...vParts] = line.replace(/^[-*]\s*/, "").split(":");
-        const value = vParts.join(":").trim();
-        const key = k?.trim();
-        if (!key || !value) continue;
-        if (key.includes("姓名")) partial.basics!.name = value;
-        if (key.includes("电话")) partial.basics!.phone = value;
-        if (key.includes("邮箱")) partial.basics!.email = value;
-        if (key.includes("意向")) partial.basics!.targetRole = value;
-        if (key.includes("所在地")) partial.basics!.location = value;
-        if (key.toLowerCase().includes("github")) partial.basics!.github = value;
-        if (key.includes("网站")) partial.basics!.website = value;
-      }
-    } else if (header.includes("个人简介")) {
-      partial.summary = lines.join(" ").trim();
-    } else if (header.includes("教育")) {
-      const bullets = parseLinesToBullets(lines);
-      partial.education = bullets.map((it) => ({
-        id: uuid(),
-        title: it,
-        description: ""
-      }));
-    } else if (header.includes("项目")) {
-      const bullets = parseLinesToBullets(lines);
-      partial.projects = bullets.map((it) => ({
-        id: uuid(),
-        title: it,
-        description: "",
-        technologies: [],
-        highlights: []
-      }));
-    } else if (header.includes("实习") || header.includes("工作") || header.includes("经历")) {
-      const bullets = parseLinesToBullets(lines);
-      partial.experience = bullets.map((it) => ({
-        id: uuid(),
-        title: it,
-        description: "",
-        achievements: []
-      }));
-    } else if (header.includes("技能")) {
-      partial.skills = [
-        {
-          id: uuid(),
-          category: "技能",
-          items: parseLinesToBullets(lines)
-        }
-      ];
-    } else if (header.includes("获奖")) {
-      partial.awards = parseLinesToBullets(lines).map((it) => ({
-        id: uuid(),
-        title: it
-      }));
-    } else if (header.includes("校园") || header.includes("社团")) {
-      partial.activities = parseLinesToBullets(lines).map((it) => ({
-        id: uuid(),
-        title: it
-      }));
-    } else if (header.includes("证书") || header.includes("语言")) {
-      partial.certifications = parseLinesToBullets(lines).map((it) => ({
-        id: uuid(),
-        title: it
-      }));
-    } else if (content) {
-      partial.customSections!.push({
-        id: uuid(),
-        title: headerLine.trim(),
-        items: [
-          {
-            id: uuid(),
-            title: headerLine.trim(),
-            subtitle: "",
-            date: "",
-            description: content
-          }
-        ]
-      });
-    }
-  }
-
-  return normalizeResumeData(partial);
+  return parseResumeTextToResumeData(text.replace(/^##\s*/gm, ""));
 }
 
 export function parseResumeTxt(text: string): ResumeData {

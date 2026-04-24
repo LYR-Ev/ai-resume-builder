@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useRef } from "react";
 import { TopBar } from "@/components/topbar";
 import { Card } from "@/components/ui/card";
 import { EditorPanel } from "@/editor/editor-panel";
@@ -9,26 +8,22 @@ import { useResumeStore } from "@/store/resume-store";
 
 export default function HomePage() {
   const hydrated = useResumeStore((state) => state.hydrated);
-  const setHydrated = useResumeStore((state) => state.setHydrated);
-  const previewRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setHydrated(true);
-  }, [setHydrated]);
 
   if (!hydrated) {
-    return <div className="p-8 text-sm text-muted-foreground">简历数据加载中...</div>;
+    return <div className="p-8 text-sm text-muted-foreground">正在从本机恢复简历数据…</div>;
   }
 
   return (
     <main className="min-h-screen">
-      <TopBar previewRef={previewRef} />
-      <div className="grid h-[calc(100vh-88px)] grid-cols-1 gap-4 p-4 xl:grid-cols-[46%_54%]">
-        <Card className="h-full overflow-auto p-4">
+      <TopBar />
+      <div className="grid h-[calc(100vh-7.5rem)] min-h-[480px] grid-cols-1 gap-0 border-t p-0 xl:grid-cols-2">
+        <Card className="h-full overflow-auto rounded-none border-0 p-4 shadow-sm xl:rounded-l-lg">
           <EditorPanel />
         </Card>
-        <div className="h-full overflow-auto">
-          <ResumePreview ref={previewRef} />
+        <div className="h-full overflow-auto border-t bg-muted/20 xl:border-l xl:border-t-0">
+          <div className="p-2 lg:p-4">
+            <ResumePreview />
+          </div>
         </div>
       </div>
     </main>

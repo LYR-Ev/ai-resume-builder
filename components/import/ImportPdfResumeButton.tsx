@@ -5,6 +5,7 @@ import { ChangeEvent, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { extractPdfText, PdfExtractResult } from "@/lib/pdf-extract";
+import { buildEmbeddedImportReport, tryDecodeEmbeddedResumeText } from "@/lib/resume-embed-pdf";
 import { ResumeImportReport } from "@/lib/resume-confidence";
 import { mergeResumeData, parseResumeTextToResumeDraft } from "@/lib/resume-parser";
 import { useResumeStore } from "@/store/resume-store";
@@ -23,7 +24,16 @@ export function ImportPdfResumeButton() {
   const [sourceName, setSourceName] = useState("");
   const [poorExtractResult, setPoorExtractResult] = useState<PdfExtractResult | null>(null);
 
-  const applyParsedDraft = (extractResult: PdfExtractResult, fileName: string) => {
+  const tryEmbedded = (fileName: string, combinedText: string) => {
+    const embedded = tryDecodeEmbeddedResumeText(combinedText);
+    if (!embedded) return false;
+    setCandidate(embedded);
+    setReport(buildEmbeddedImportReport(embedded));
+    setSourceName(fileName);
+    return true;
+  };
+
+  const applyHeuristicDraft = (extractResult: PdfExtractResult, fileName: string) => {
     const textForParse = extractResult.cleanedText || extractResult.rawText;
     const draft = parseResumeTextToResumeDraft(textForParse);
     setCandidate(draft.resume);
@@ -45,6 +55,12 @@ export function ImportPdfResumeButton() {
     try {
       setLoading(true);
       const extractResult = await extractPdfText(file);
+      const combined = `${extractResult.rawText}\n${extractResult.cleanedText}`;
+
+      if (tryEmbedded(file.name, combined)) {
+        return;
+      }
+
       if (extractResult.quality === "empty") {
         throw new Error("未能从 PDF 中提取到可用文字，该文件可能是扫描版图片或受保护 PDF。");
       }
@@ -53,7 +69,7 @@ export function ImportPdfResumeButton() {
         setSourceName(file.name);
         return;
       }
-      applyParsedDraft(extractResult, file.name);
+      applyHeuristicDraft(extractResult, file.name);
     } catch (e) {
       console.error(e);
       setError(e instanceof Error ? e.message : "PDF 解析失败，请稍后重试。");
@@ -70,7 +86,10 @@ export function ImportPdfResumeButton() {
 
   const confirmReplace = () => {
     if (!candidate) return;
-    importResume(candidate);
+    importResume({
+      ...candidate,
+      meta: { ...candidate.meta, updatedAt: new Date().toISOString() }
+    });
     setSuccess("PDF 导入成功，已覆盖当前简历内容。");
     closeDialog();
   };
@@ -114,6 +133,11 @@ export function ImportPdfResumeButton() {
             <p className="text-sm text-muted-foreground">
               已完成对 <span className="font-medium text-foreground">{sourceName}</span> 的解析，检测到以下内容：
             </p>
+            {report && !report.lowConfidenceFields.length && report.name.confidence >= 0.99 && (
+              <p className="rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-800">
+                识别为带内嵌数据的本应用导出 PDF，可完整还原简历结构与内容（含照片等字段）。
+              </p>
+            )}
             <div className="grid grid-cols-1 gap-2 text-sm md:grid-cols-2">
               <p>姓名：{candidate.basics.name || "未识别"}{report ? ` (${Math.round(report.name.confidence * 100)}%)` : ""}</p>
               <p>邮箱：{candidate.basics.email || "未识别"}{report ? ` (${Math.round(report.email.confidence * 100)}%)` : ""}</p>
@@ -163,8 +187,8 @@ export function ImportPdfResumeButton() {
               </Button>
               <Button
                 onClick={() => {
-                  if (!sourceName) return;
-                  applyParsedDraft(poorExtractResult, sourceName);
+                  if (!sourceName || !poorExtractResult) return;
+                  applyHeuristicDraft(poorExtractResult, sourceName);
                   setPoorExtractResult(null);
                 }}
               >

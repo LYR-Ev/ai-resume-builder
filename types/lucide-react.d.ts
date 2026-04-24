@@ -14,6 +14,7 @@ declare module "lucide-react" {
   export const FileUp: Icon;
   export const FileJson: Icon;
   export const FileText: Icon;
+  export const UploadCloud: Icon;
   export const RefreshCw: Icon;
   export const WandSparkles: Icon;
   export const Moon: Icon;

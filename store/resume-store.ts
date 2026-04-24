@@ -230,13 +230,19 @@ export const useResumeStore = create<ResumeState>()(
           resume: normalizeResumeData(data)
         })),
       resetResume: () =>
-        set(() => ({
-          resume: normalizeResumeData(blankResumeData)
-        })),
+        set(() => {
+          const next = normalizeResumeData(blankResumeData);
+          return {
+            resume: { ...next, meta: { ...next.meta, updatedAt: new Date().toISOString() } }
+          };
+        }),
       fillExample: () =>
-        set(() => ({
-          resume: normalizeResumeData(defaultResumeData)
-        }))
+        set(() => {
+          const next = normalizeResumeData(defaultResumeData);
+          return {
+            resume: { ...next, meta: { ...next.meta, updatedAt: new Date().toISOString() } }
+          };
+        })
     }),
     {
       name: "resume-builder-storage",

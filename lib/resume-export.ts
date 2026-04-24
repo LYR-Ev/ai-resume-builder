@@ -1,5 +1,6 @@
-import { ResumeData } from "@/types/resume";
+import { buildVectorResumePdfBlob } from "@/lib/resume-pdf-vector";
 import { todayString } from "@/lib/utils";
+import { ResumeData } from "@/types/resume";
 
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -87,19 +88,12 @@ export function exportResumeMarkdown(data: ResumeData) {
   downloadBlob(blob, `${baseFilename(data)}.md`);
 }
 
-export async function exportResumePdf(targetElement: HTMLElement, data: ResumeData) {
-  const module = await import("html2pdf.js");
-  const html2pdf = module.default;
+/**
+ * 导出为矢量文字 PDF，并在文尾嵌入可回导的简历 JSON 数据区（AIB1 / 标记行）。
+ * 不依赖整页截图为位图，便于检索与“导入 PDF 简历”无损回传。
+ */
+export async function exportResumePdf(data: ResumeData) {
+  const blob = await buildVectorResumePdfBlob(data);
   const filename = `${baseFilename(data)}.pdf`;
-  await html2pdf()
-    .set({
-      filename,
-      margin: [8, 8, 8, 8],
-      image: { type: "jpeg", quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true },
-      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-      pagebreak: { mode: ["avoid-all", "css", "legacy"] }
-    })
-    .from(targetElement)
-    .save();
+  downloadBlob(blob, filename);
 }

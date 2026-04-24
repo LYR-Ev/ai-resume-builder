@@ -91,7 +91,8 @@ export function normalizeResumeData(input: Partial<ResumeData> | null | undefine
   return {
     meta: {
       template: template ?? "minimal",
-      updatedAt: new Date().toISOString()
+      /* 留存在导入/持久化时带来的时间，避免只读重载时反复刷新为「当前时间」 */
+      updatedAt: input?.meta?.updatedAt ?? new Date().toISOString()
     },
     basics: {
       ...fallback.basics,
